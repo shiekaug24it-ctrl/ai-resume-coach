@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: airesume-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: airesume
+      MYSQL_USER: airesume
+      MYSQL_PASSWORD: airesume123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: airesume-backend
+    environment:
+      SERVER_PORT: 8080
+      MYSQL_USER: airesume
+      MYSQL_PASSWORD: airesume123
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/airesume?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+      JWT_SECRET: ${JWT_SECRET:-my-very-secret-jwt-key-for-ai-resume-coach-2026-change-me-in-production}
+      JWT_EXPIRATION: 86400000
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: google/gemini-3-flash-preview
+      AI_GATEWAY_URL: https://ai.gateway.lovable.dev/v1/chat/completions
+      UPLOAD_DIR: /app/uploads
+      CORS_ORIGINS: http://localhost:5173,http://localhost:3000
+    ports:
+      - "8080:8080"
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  uploads_data:
+

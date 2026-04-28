@@ -2,8 +2,8 @@ import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
 import { Sparkles } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/lib/auth";
+import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -40,14 +40,16 @@ function AuthPage() {
       return;
     }
     setSubmitting(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    setSubmitting(false);
-    if (error) {
-      toast.error(error.message);
-      return;
+    try {
+      const { data } = await api.post("/api/auth/login", { email, password });
+      localStorage.setItem("token", data.token);
+      toast.success("Welcome back!");
+      window.location.href = "/dashboard";
+    } catch (e: any) {
+      toast.error(e.response?.data?.message || "Login failed");
+    } finally {
+      setSubmitting(false);
     }
-    toast.success("Welcome back!");
-    navigate({ to: "/dashboard" });
   };
 
   const handleSignup = async (e: FormEvent<HTMLFormElement>) => {
@@ -65,20 +67,20 @@ function AuthPage() {
       return;
     }
     setSubmitting(true);
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        emailRedirectTo: `${window.location.origin}/dashboard`,
-        data: { display_name: name },
-      },
-    });
-    setSubmitting(false);
-    if (error) {
-      toast.error(error.message);
-      return;
+    try {
+      const { data } = await api.post("/api/auth/register", {
+        name,
+        email,
+        password,
+      });
+      localStorage.setItem("token", data.token);
+      toast.success("Account created!");
+      window.location.href = "/dashboard";
+    } catch (e: any) {
+      toast.error(e.response?.data?.message || "Signup failed");
+    } finally {
+      setSubmitting(false);
     }
-    toast.success("Account created! Check your email to confirm.");
   };
 
   return (

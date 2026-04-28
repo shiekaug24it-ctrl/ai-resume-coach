@@ -1,27 +1,25 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useEffect, useState, useCallback, useRef } from "react";
 import { Upload, FileText, Trash2, Sparkles, Loader2, ArrowRight } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/lib/auth";
+import { api } from "@/lib/api";
+import { extractResumeText } from "@/lib/extractText";
 import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/SiteHeader";
-import { extractResumeText } from "@/lib/extractText";
 import { toast } from "sonner";
-import type { Tables } from "@/integrations/supabase/types";
+import type { Resume } from "@/types/api";
 
 export const Route = createFileRoute("/dashboard")({
   component: Dashboard,
 });
 
-const MAX_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_SIZE = 5 * 1024 * 1024;
 const ALLOWED = [
   "application/pdf",
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 ];
 const ALLOWED_EXT = [".pdf", ".doc", ".docx"];
-
-type Resume = Tables<"resumes">;
 
 function Dashboard() {
   const { user, loading } = useAuth();
@@ -37,16 +35,16 @@ function Dashboard() {
   }, [user, loading, navigate]);
 
   const loadResumes = useCallback(async () => {
-    if (!user) return;
     setFetching(true);
-    const { data, error } = await supabase
-      .from("resumes")
-      .select("*")
-      .order("created_at", { ascending: false });
-    if (error) toast.error(error.message);
-    else setResumes(data ?? []);
-    setFetching(false);
-  }, [user]);
+    try {
+      const { data } = await api.get("/api/resumes");
+      setResumes(data);
+    } catch (e: any) {
+      toast.error(e.response?.data?.message || "Failed to load resumes");
+    } finally {
+      setFetching(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (user) loadResumes();
@@ -64,7 +62,6 @@ function Dashboard() {
   };
 
   const handleFile = async (file: File) => {
-    if (!user) return;
     const err = validateFile(file);
     if (err) {
       toast.error(err);
@@ -72,16 +69,6 @@ function Dashboard() {
     }
     setUploading(true);
     try {
-      const ext = file.name.split(".").pop() || "pdf";
-      const path = `${user.id}/${crypto.randomUUID()}.${ext}`;
-
-      // Upload to storage
-      const { error: upErr } = await supabase.storage
-        .from("resumes")
-        .upload(path, file, { contentType: file.type, upsert: false });
-      if (upErr) throw upErr;
-
-      // Extract text
       let extracted = "";
       try {
         extracted = await extractResumeText(file);
@@ -89,81 +76,34 @@ function Dashboard() {
         console.warn("text extraction failed", e);
       }
 
-      // Insert row
-      const { data: row, error: insErr } = await supabase
-        .from("resumes")
-        .insert({
-          user_id: user.id,
-          file_name: file.name,
-          file_path: path,
-          file_size: file.size,
-          mime_type: file.type || "application/octet-stream",
-          extracted_text: extracted || null,
-          status: extracted ? "analyzing" : "uploaded",
-        })
-        .select()
-        .single();
-      if (insErr) throw insErr;
-
-      toast.success("Uploaded — running AI analysis...");
-      await loadResumes();
-
-      // Kick off AI analysis if we have text
-      if (extracted && row) {
-        analyzeResume(row.id, extracted, file.name);
+      const formData = new FormData();
+      formData.append("file", file);
+      if (extracted) {
+        formData.append("extractedText", extracted);
       }
-    } catch (e) {
+
+      const { data } = await api.post("/api/resumes", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+
+      toast.success(data.status === "analyzing" ? "Uploaded - running AI analysis..." : "Uploaded!");
+      await loadResumes();
+    } catch (e: any) {
       console.error(e);
-      toast.error(e instanceof Error ? e.message : "Upload failed");
+      toast.error(e.response?.data?.message || "Upload failed");
     } finally {
       setUploading(false);
     }
   };
 
-  const analyzeResume = async (resumeId: string, text: string, fileName: string) => {
+  const handleDelete = async (id: number) => {
+    if (!confirm("Delete this resume?")) return;
     try {
-      const { data, error } = await supabase.functions.invoke("analyze-resume", {
-        body: { resumeText: text, fileName },
-      });
-      if (error) {
-        if (error.message?.includes("429"))
-          toast.error("Rate limit reached. Try again in a moment.");
-        else if (error.message?.includes("402"))
-          toast.error("AI credits exhausted. Add funds to keep analyzing.");
-        else toast.error(error.message);
-        return;
-      }
-      const analysis = data?.analysis;
-      if (!analysis) {
-        toast.error("Analysis returned no data");
-        return;
-      }
-      await supabase
-        .from("resumes")
-        .update({
-          ai_score: analysis.score,
-          ai_summary: analysis.summary,
-          ai_suggestions: analysis.suggestions,
-          ai_keywords: analysis.keywords,
-          status: "analyzed",
-        })
-        .eq("id", resumeId);
-      toast.success("Analysis complete!");
-      loadResumes();
-    } catch (e) {
-      console.error(e);
-      toast.error("Analysis failed");
-    }
-  };
-
-  const handleDelete = async (resume: Resume) => {
-    if (!confirm(`Delete "${resume.file_name}"?`)) return;
-    await supabase.storage.from("resumes").remove([resume.file_path]);
-    const { error } = await supabase.from("resumes").delete().eq("id", resume.id);
-    if (error) toast.error(error.message);
-    else {
+      await api.delete(`/api/resumes/${id}`);
       toast.success("Deleted");
       loadResumes();
+    } catch (e: any) {
+      toast.error(e.response?.data?.message || "Delete failed");
     }
   };
 
@@ -195,18 +135,12 @@ function Dashboard() {
           </div>
         </div>
 
-        {/* Upload zone */}
         <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragOver(true);
-          }}
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={onDrop}
           className={`relative mb-12 rounded-2xl border-2 border-dashed p-12 text-center transition ${
-            dragOver
-              ? "border-accent bg-accent/5"
-              : "border-border bg-card hover:border-accent/50"
+            dragOver ? "border-accent bg-accent/5" : "border-border bg-card hover:border-accent/50"
           }`}
         >
           <input
@@ -226,24 +160,15 @@ function Dashboard() {
           <h3 className="font-display text-lg font-semibold">
             {uploading ? "Uploading & analyzing..." : "Drop your resume here"}
           </h3>
-          <p className="mt-1 text-sm text-muted-foreground">
-            PDF, DOC, or DOCX · Max 5 MB
-          </p>
-          <Button
-            variant="hero"
-            className="mt-6"
-            disabled={uploading}
-            onClick={() => fileInputRef.current?.click()}
-          >
+          <p className="mt-1 text-sm text-muted-foreground">PDF, DOC, or DOCX · Max 5 MB</p>
+          <Button variant="hero" className="mt-6" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
             <Upload className="h-4 w-4" />
             Choose file
           </Button>
         </div>
 
-        {/* List */}
         <div>
           <h2 className="mb-4 font-display text-xl font-semibold">Saved resumes</h2>
-
           {fetching ? (
             <div className="rounded-xl border border-border bg-card p-12 text-center">
               <Loader2 className="mx-auto h-5 w-5 animate-spin text-accent" />
@@ -255,7 +180,7 @@ function Dashboard() {
           ) : (
             <div className="grid gap-4 md:grid-cols-2">
               {resumes.map((r) => (
-                <ResumeCard key={r.id} resume={r} onDelete={() => handleDelete(r)} />
+                <ResumeCard key={r.id} resume={r} onDelete={() => handleDelete(r.id)} />
               ))}
             </div>
           )}
@@ -266,7 +191,7 @@ function Dashboard() {
 }
 
 function ResumeCard({ resume, onDelete }: { resume: Resume; onDelete: () => void }) {
-  const score = resume.ai_score;
+  const score = resume.aiScore;
   return (
     <div className="group relative rounded-2xl border border-border bg-card p-6 transition hover:border-accent/40 hover:shadow-glow">
       <div className="flex items-start justify-between gap-4">
@@ -275,27 +200,20 @@ function ResumeCard({ resume, onDelete }: { resume: Resume; onDelete: () => void
             <FileText className="h-5 w-5" />
           </div>
           <div className="min-w-0">
-            <p className="truncate font-display font-semibold">{resume.file_name}</p>
+            <p className="truncate font-display font-semibold">{resume.fileName}</p>
             <p className="mt-0.5 font-mono text-xs text-muted-foreground">
-              {(resume.file_size / 1024).toFixed(1)} KB ·{" "}
-              {new Date(resume.created_at).toLocaleDateString()}
+              {(resume.fileSize / 1024).toFixed(1)} KB · {new Date(resume.createdAt).toLocaleDateString()}
             </p>
           </div>
         </div>
-        <button
-          onClick={onDelete}
-          className="text-muted-foreground transition hover:text-destructive"
-          aria-label="Delete"
-        >
+        <button onClick={onDelete} className="text-muted-foreground transition hover:text-destructive" aria-label="Delete">
           <Trash2 className="h-4 w-4" />
         </button>
       </div>
 
       <div className="mt-5 flex items-center justify-between rounded-xl bg-surface-3 p-4">
         <div>
-          <p className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-            AI Score
-          </p>
+          <p className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">AI Score</p>
           {score != null ? (
             <p className="mt-1 font-display text-3xl font-bold text-gradient-accent">{score}</p>
           ) : (
@@ -305,18 +223,19 @@ function ResumeCard({ resume, onDelete }: { resume: Resume; onDelete: () => void
           )}
         </div>
         <Button variant="outlineGlow" size="sm" asChild>
-          <Link to="/resume/$id" params={{ id: resume.id }}>
+          <Link to="/resume/$id" params={{ id: String(resume.id) }}>
             View <ArrowRight className="h-4 w-4" />
           </Link>
         </Button>
       </div>
 
-      {resume.ai_summary && (
+      {resume.aiSummary && (
         <p className="mt-4 line-clamp-2 text-sm text-muted-foreground">
           <Sparkles className="mr-1 inline h-3 w-3 text-accent" />
-          {resume.ai_summary}
+          {resume.aiSummary}
         </p>
       )}
     </div>
   );
 }
+
