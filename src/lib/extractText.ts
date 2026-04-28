@@ -25,8 +25,6 @@ export async function extractResumeText(file: File): Promise<string> {
 
 async function extractPdf(file: File): Promise<string> {
   const pdfjs = await import("pdfjs-dist");
-  // Configure worker via CDN matching installed version
-  // @ts-expect-error - dynamic field
   pdfjs.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
   const buf = await file.arrayBuffer();
